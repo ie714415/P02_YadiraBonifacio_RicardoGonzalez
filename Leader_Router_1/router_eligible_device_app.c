@@ -43,6 +43,10 @@ Include Files
 #include "app_temp_sensor.h"
 #include "coap.h"
 #include "app_socket_utils.h"
+
+/* Timer */
+#include "TimersManager.h"
+
 #if THR_ENABLE_EVENT_MONITORING
 #include "app_event_monitoring.h"
 #endif
@@ -79,11 +83,16 @@ Private macros
 #define APP_LED_URI_PATH                        "/led"
 #define APP_TEMP_URI_PATH                       "/temp"
 #define APP_SINK_URI_PATH                       "/sink"
+
+#define APP_TEAM8_URI_PATH						"/team8"
 #if LARGE_NETWORK
 #define APP_RESET_TO_FACTORY_URI_PATH           "/reset"
 #endif
 
 #define APP_DEFAULT_DEST_ADDR                   in6addr_realmlocal_allthreadnodes
+
+#define START_COUNTER							1
+#define END_COUNTER								200
 
 /*==================================================================================================
 Private type definitions
@@ -121,6 +130,8 @@ static void APP_CoapLedCb(coapSessionStatus_t sessionStatus, uint8_t *pData, coa
 static void APP_CoapTempCb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_CoapSinkCb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
 static void App_RestoreLeaderLed(uint8_t *param);
+static void TaskTimerCallback(void *param);
+static void APP_CoapTeam8Cb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
 #if LARGE_NETWORK
 static void APP_CoapResetToFactoryDefaultsCb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_SendResetToFactoryCommand(uint8_t *param);
@@ -136,6 +147,7 @@ Public global variables declarations
 const coapUriPath_t gAPP_LED_URI_PATH  = {SizeOfString(APP_LED_URI_PATH), (uint8_t *)APP_LED_URI_PATH};
 const coapUriPath_t gAPP_TEMP_URI_PATH = {SizeOfString(APP_TEMP_URI_PATH), (uint8_t *)APP_TEMP_URI_PATH};
 const coapUriPath_t gAPP_SINK_URI_PATH = {SizeOfString(APP_SINK_URI_PATH), (uint8_t *)APP_SINK_URI_PATH};
+const coapUriPath_t gAPP_TEAM8_URI_PATH = {SizeOfString(APP_TEAM8_URI_PATH), (uint8_t *)APP_TEAM8_URI_PATH};
 #if LARGE_NETWORK
 const coapUriPath_t gAPP_RESET_URI_PATH = {SizeOfString(APP_RESET_TO_FACTORY_URI_PATH), (uint8_t *)APP_RESET_TO_FACTORY_URI_PATH};
 #endif
@@ -156,6 +168,11 @@ ipAddr_t gCoapDestAddress;
 
 /* Application timer Id */
 tmrTimerID_t mAppTimerId = gTmrInvalidTimerID_c;
+
+/* Global Variable to store our TimerID */
+tmrTimerID_t gTimerID = gTmrInvalidTimerID_c;
+
+static uint8_t gCounter = START_COUNTER;
 
 #if APP_AUTOSTART
 tmrTimerID_t tmrStartApp = gTmrInvalidTimerID_c;
@@ -422,6 +439,8 @@ void APP_Commissioning_Handler
             App_UpdateStateLeds(gDeviceState_FactoryDefault_c);
             break;
         case gThrEv_MeshCop_JoinerAccepted_c:
+        	gTimerID = TMR_AllocateTimer();
+        	TMR_StartIntervalTimer(gTimerID,1000,TaskTimerCallback,NULL);
             break;
 
         /* Commissioner Events(event set applies for all Commissioners: on-mesh, external, native) */
@@ -487,6 +506,7 @@ static void APP_InitCoapDemo
 {
     coapRegCbParams_t cbParams[] =  {{APP_CoapLedCb,  (coapUriPath_t *)&gAPP_LED_URI_PATH},
                                      {APP_CoapTempCb, (coapUriPath_t *)&gAPP_TEMP_URI_PATH},
+									 {APP_CoapTeam8Cb, (coapUriPath_t *)&gAPP_TEAM8_URI_PATH},
 #if LARGE_NETWORK
                                      {APP_CoapResetToFactoryDefaultsCb, (coapUriPath_t *)&gAPP_RESET_URI_PATH},
 #endif
@@ -1389,6 +1409,80 @@ static void App_RestoreLeaderLed
     App_UpdateStateLeds(gDeviceState_Leader_c);
 }
 
+/*!*************************************************************************************************
+\private
+\fn     static void TaskTimerCallback(void *param)
+\brief  Called by the Timer each time it expires.
+
+\param  [in]    param    Not used
+***************************************************************************************************/
+static void TaskTimerCallback(void *param)
+{
+	gCounter++;
+
+	if(END_COUNTER < gCounter)
+	{
+		gCounter = START_COUNTER;
+	}
+}
+
+/*!*************************************************************************************************
+\private
+\fn     static void App_CoapTeam8Cb(coapSessionStatus_t sessionStatus, uint8_t *pData,
+                                   coapSession_t *pSession, uint32_t dataLen)
+\brief  This function is the callback function for CoAP sink message.
+
+\param  [in]    sessionStatus   Status for CoAP session
+\param  [in]    pData           Pointer to CoAP message payload
+\param  [in]    pSession        Pointer to CoAP session
+\param  [in]    dataLen         Length of CoAP payload
+***************************************************************************************************/
+static void APP_CoapTeam8Cb
+(
+	coapSessionStatus_t sessionStatus,
+	uint8_t *pData,
+	coapSession_t *pSession,
+	uint32_t dataLen
+)
+{
+	static uint8_t pMySessionPayload[3] = {0x31,0x32,0x33};
+	static uint32_t pMyPayloadSize = 3;
+	coapSession_t *pMySession = NULL;
+	pMySession = COAP_OpenSession(mAppCoapInstId);
+	COAP_AddOptionToList(pMySession, COAP_URI_PATH_OPTION, APP_TEAM8_URI_PATH, SizeOfString(APP_TEAM8_URI_PATH));
+
+	pMySessionPayload[0] = gCounter + '0';
+
+	char pAddrStr[INET6_ADDRSTRLEN];
+	ntop(AF_INET6, (ipAddr_t *)&pSession->remoteAddrStorage.ss_addr, pAddrStr, INET6_ADDRSTRLEN);
+
+	if (gCoapConfirmable_c == pSession->msgType)
+	{
+		shell_write("'CON' instruction received from: ");
+		shell_write(pAddrStr);
+		/* Send CoAP ACK */
+		if(gCoapFailure_c != sessionStatus)
+		{
+			COAP_Send(pSession, gCoapMsgTypeAckSuccessChanged_c, NULL, 0);
+		}
+	}
+	else if(gCoapNonConfirmable_c == pSession->msgType)
+	{
+		shell_write("'NON' instruction received from: ");
+		shell_write(pAddrStr);
+	}
+
+	shell_write("\r\n");
+	pMySession -> msgType = gCoapNonConfirmable_c;
+	pMySession -> code = gCoapPOST_c;
+	pMySession -> pCallback = NULL;
+	FLib_MemCpy(&pMySession->remoteAddrStorage,&gCoapDestAddress,sizeof(ipAddr_t));
+	COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
+
+	shell_write("Timer Counter: ");
+	shell_write(pMySessionPayload[0]);
+	shell_write("\r\n");
+}
 #if LARGE_NETWORK
 /*!*************************************************************************************************
 \private
