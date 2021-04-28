@@ -17,6 +17,7 @@ Include Files
 /* General Includes */
 #include "EmbeddedTypes.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* FSL Framework */
 #include "shell.h"
@@ -46,6 +47,19 @@ Include Files
 
 /* Timer */
 #include "TimersManager.h"
+
+/* Bubble */
+#include "fsl_debug_console.h"
+#include "board.h"
+#include "math.h"
+#include "fsl_fxos.h"
+#include "fsl_i2c.h"
+#include "fsl_tpm.h"
+
+#include "clock_config.h"
+#include "pin_mux.h"
+#include "fsl_gpio.h"
+#include "fsl_port.h"
 
 #if THR_ENABLE_EVENT_MONITORING
 #include "app_event_monitoring.h"
@@ -85,6 +99,9 @@ Private macros
 #define APP_SINK_URI_PATH                       "/sink"
 
 #define APP_TEAM8_URI_PATH						"/team8"
+
+#define APP_ACCEL_URI_PATH						"/accel"
+
 #if LARGE_NETWORK
 #define APP_RESET_TO_FACTORY_URI_PATH           "/reset"
 #endif
@@ -93,6 +110,29 @@ Private macros
 
 #define START_COUNTER							1
 #define END_COUNTER								200
+
+/* Bubble */
+/* The TPM instance/channel used for board */
+#define BOARD_TIMER_BASEADDR TPM2
+#define BOARD_FIRST_TIMER_CHANNEL 0U
+#define BOARD_SECOND_TIMER_CHANNEL 1U
+/* Get source clock for TPM driver */
+#define BOARD_TIMER_SOURCE_CLOCK CLOCK_GetFreq(kCLOCK_Osc0ErClk)
+#define TIMER_CLOCK_MODE 1U
+/* I2C source clock */
+#define ACCEL_I2C_CLK_SRC I2C1_CLK_SRC
+#define I2C_BAUDRATE 100000U
+
+#define I2C_RELEASE_SDA_PORT PORTC
+#define I2C_RELEASE_SCL_PORT PORTC
+#define I2C_RELEASE_SDA_GPIO GPIOC
+#define I2C_RELEASE_SDA_PIN 3U
+#define I2C_RELEASE_SCL_GPIO GPIOC
+#define I2C_RELEASE_SCL_PIN 2U
+#define I2C_RELEASE_BUS_COUNT 100U
+/* Upper bound and lower bound angle values */
+#define ANGLE_UPPER_BOUND 85U
+#define ANGLE_LOWER_BOUND 5U
 
 /*==================================================================================================
 Private type definitions
@@ -132,6 +172,8 @@ static void APP_CoapSinkCb(coapSessionStatus_t sessionStatus, uint8_t *pData, co
 static void App_RestoreLeaderLed(uint8_t *param);
 static void TaskTimerCallback(void *param);
 static void APP_CoapTeam8Cb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
+static void Accel_Init(void);
+static void APP_CoapAccelCb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
 #if LARGE_NETWORK
 static void APP_CoapResetToFactoryDefaultsCb(coapSessionStatus_t sessionStatus, uint8_t *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_SendResetToFactoryCommand(uint8_t *param);
@@ -141,6 +183,8 @@ static void APP_AutoStart(void *param);
 static void APP_AutoStartCb(void *param);
 #endif
 
+/* Bubble */
+void BOARD_I2C_ReleaseBus(void);
 /*==================================================================================================
 Public global variables declarations
 ==================================================================================================*/
@@ -148,6 +192,7 @@ const coapUriPath_t gAPP_LED_URI_PATH  = {SizeOfString(APP_LED_URI_PATH), (uint8
 const coapUriPath_t gAPP_TEMP_URI_PATH = {SizeOfString(APP_TEMP_URI_PATH), (uint8_t *)APP_TEMP_URI_PATH};
 const coapUriPath_t gAPP_SINK_URI_PATH = {SizeOfString(APP_SINK_URI_PATH), (uint8_t *)APP_SINK_URI_PATH};
 const coapUriPath_t gAPP_TEAM8_URI_PATH = {SizeOfString(APP_TEAM8_URI_PATH), (uint8_t *)APP_TEAM8_URI_PATH};
+const coapUriPath_t gAPP_ACCEL_URI_PATH = {SizeOfString(APP_ACCEL_URI_PATH), (uint8_t *)APP_ACCEL_URI_PATH};
 #if LARGE_NETWORK
 const coapUriPath_t gAPP_RESET_URI_PATH = {SizeOfString(APP_RESET_TO_FACTORY_URI_PATH), (uint8_t *)APP_RESET_TO_FACTORY_URI_PATH};
 #endif
@@ -174,6 +219,10 @@ tmrTimerID_t gTimerID = gTmrInvalidTimerID_c;
 
 static uint8_t gCounter = START_COUNTER;
 
+i2c_master_handle_t g_MasterHandle;
+/* FXOS device address */
+const uint8_t g_accel_address[] = {0x1CU, 0x1DU, 0x1EU, 0x1FU};
+
 #if APP_AUTOSTART
 tmrTimerID_t tmrStartApp = gTmrInvalidTimerID_c;
 #endif
@@ -185,9 +234,107 @@ taskMsgQueue_t *mpAppThreadMsgQueue = NULL;
 
 extern bool_t gEnable802154TxLed;
 
+/* Bubble */
+fxos_handle_t gfxosHandle;
+uint8_t gdataScale = 0;
+
 /*==================================================================================================
 Public functions
 ==================================================================================================*/
+static void i2c_release_bus_delay(void)
+{
+    uint32_t i = 0;
+    for (i = 0; i < I2C_RELEASE_BUS_COUNT; i++)
+    {
+        __NOP();
+    }
+}
+
+void BOARD_I2C_ReleaseBus(void)
+{
+    uint8_t i = 0;
+    gpio_pin_config_t pin_config;
+    port_pin_config_t i2c_pin_config = {0};
+
+    /* Config pin mux as gpio */
+    i2c_pin_config.pullSelect = kPORT_PullUp;
+    i2c_pin_config.mux = kPORT_MuxAsGpio;
+
+    pin_config.pinDirection = kGPIO_DigitalOutput;
+    pin_config.outputLogic = 1U;
+    CLOCK_EnableClock(kCLOCK_PortC);
+    PORT_SetPinConfig(I2C_RELEASE_SCL_PORT, I2C_RELEASE_SCL_PIN, &i2c_pin_config);
+    PORT_SetPinConfig(I2C_RELEASE_SDA_PORT, I2C_RELEASE_SDA_PIN, &i2c_pin_config);
+
+    GPIO_PinInit(I2C_RELEASE_SCL_GPIO, I2C_RELEASE_SCL_PIN, &pin_config);
+    GPIO_PinInit(I2C_RELEASE_SDA_GPIO, I2C_RELEASE_SDA_PIN, &pin_config);
+
+    /* Drive SDA low first to simulate a start */
+    GPIO_WritePinOutput(I2C_RELEASE_SDA_GPIO, I2C_RELEASE_SDA_PIN, 0U);
+    i2c_release_bus_delay();
+
+    /* Send 9 pulses on SCL and keep SDA high */
+    for (i = 0; i < 9; i++)
+    {
+        GPIO_WritePinOutput(I2C_RELEASE_SCL_GPIO, I2C_RELEASE_SCL_PIN, 0U);
+        i2c_release_bus_delay();
+
+        GPIO_WritePinOutput(I2C_RELEASE_SDA_GPIO, I2C_RELEASE_SDA_PIN, 1U);
+        i2c_release_bus_delay();
+
+        GPIO_WritePinOutput(I2C_RELEASE_SCL_GPIO, I2C_RELEASE_SCL_PIN, 1U);
+        i2c_release_bus_delay();
+        i2c_release_bus_delay();
+    }
+
+    /* Send stop */
+    GPIO_WritePinOutput(I2C_RELEASE_SCL_GPIO, I2C_RELEASE_SCL_PIN, 0U);
+    i2c_release_bus_delay();
+
+    GPIO_WritePinOutput(I2C_RELEASE_SDA_GPIO, I2C_RELEASE_SDA_PIN, 0U);
+    i2c_release_bus_delay();
+
+    GPIO_WritePinOutput(I2C_RELEASE_SCL_GPIO, I2C_RELEASE_SCL_PIN, 1U);
+    i2c_release_bus_delay();
+
+    GPIO_WritePinOutput(I2C_RELEASE_SDA_GPIO, I2C_RELEASE_SDA_PIN, 1U);
+    i2c_release_bus_delay();
+}
+
+/* Initialize timer module */
+static void Timer_Init(void)
+{
+    /* convert to match type of data */
+    tpm_config_t tpmInfo;
+    tpm_chnl_pwm_signal_param_t tpmParam[2];
+
+    /* Configure tpm params with frequency 24kHZ */
+    tpmParam[0].chnlNumber = (tpm_chnl_t)BOARD_FIRST_TIMER_CHANNEL;
+    tpmParam[0].level = kTPM_LowTrue;
+    tpmParam[0].dutyCyclePercent = 0U;
+
+    tpmParam[1].chnlNumber = (tpm_chnl_t)BOARD_SECOND_TIMER_CHANNEL;
+    tpmParam[1].level = kTPM_LowTrue;
+    tpmParam[1].dutyCyclePercent = 0U;
+
+    /* Initialize TPM module */
+    TPM_GetDefaultConfig(&tpmInfo);
+    TPM_Init(BOARD_TIMER_BASEADDR, &tpmInfo);
+
+    CLOCK_SetTpmClock(TIMER_CLOCK_MODE);
+
+    TPM_SetupPwm(BOARD_TIMER_BASEADDR, tpmParam, 2U, kTPM_EdgeAlignedPwm, 24000U, BOARD_TIMER_SOURCE_CLOCK);
+    TPM_StartTimer(BOARD_TIMER_BASEADDR, kTPM_SystemClock);
+}
+
+/* Update the duty cycle of an active pwm signal */
+static void Board_UpdatePwm(uint16_t x, uint16_t y)
+{
+    /* Updated duty cycle */
+    TPM_UpdatePwmDutycycle(BOARD_TIMER_BASEADDR, (tpm_chnl_t)BOARD_FIRST_TIMER_CHANNEL, kTPM_EdgeAlignedPwm, x);
+    TPM_UpdatePwmDutycycle(BOARD_TIMER_BASEADDR, (tpm_chnl_t)BOARD_SECOND_TIMER_CHANNEL, kTPM_EdgeAlignedPwm, y);
+}
+
 /*!*************************************************************************************************
 \fn     void APP_Init(void)
 \brief  This function is used to initialize application.
@@ -197,6 +344,8 @@ void APP_Init
     void
 )
 {
+	Accel_Init();
+
     /* Initialize pointer to application task message queue */
     mpAppThreadMsgQueue = &appThreadMsgQueue;
 
@@ -507,6 +656,7 @@ static void APP_InitCoapDemo
     coapRegCbParams_t cbParams[] =  {{APP_CoapLedCb,  (coapUriPath_t *)&gAPP_LED_URI_PATH},
                                      {APP_CoapTempCb, (coapUriPath_t *)&gAPP_TEMP_URI_PATH},
 									 {APP_CoapTeam8Cb, (coapUriPath_t *)&gAPP_TEAM8_URI_PATH},
+									 {APP_CoapAccelCb, (coapUriPath_t *)&gAPP_ACCEL_URI_PATH},
 #if LARGE_NETWORK
                                      {APP_CoapResetToFactoryDefaultsCb, (coapUriPath_t *)&gAPP_RESET_URI_PATH},
 #endif
@@ -1445,21 +1595,25 @@ static void APP_CoapTeam8Cb
 	uint32_t dataLen
 )
 {
-	static uint8_t pMySessionPayload[3] = {0x31,0x32,0x33};
-	static uint32_t pMyPayloadSize = 3;
+	static uint8_t pMySessionPayload[50] = "Counter = ";
+	static uint32_t pMyPayloadSize = 10;
+	uint8_t indx = 0;
+	char pMySessionPayloadTemp[3];
+	char pMySessionPayloadMsg[] = " from ";
 	coapSession_t *pMySession = NULL;
 	pMySession = COAP_OpenSession(mAppCoapInstId);
 	COAP_AddOptionToList(pMySession, COAP_URI_PATH_OPTION, APP_TEAM8_URI_PATH, SizeOfString(APP_TEAM8_URI_PATH));
 
-	pMySessionPayload[0] = gCounter + '0';
+	char pAddrStrLeader[INET6_ADDRSTRLEN];
+	ntop(AF_INET6, (ipAddr_t *)&pSession->remoteAddrStorage.ss_addr, pAddrStrLeader, INET6_ADDRSTRLEN);
 
-	char pAddrStr[INET6_ADDRSTRLEN];
-	ntop(AF_INET6, (ipAddr_t *)&pSession->remoteAddrStorage.ss_addr, pAddrStr, INET6_ADDRSTRLEN);
+	char pAddrStrRouter[INET6_ADDRSTRLEN];
+	ntop(AF_INET6, (ipAddr_t *)&pSession->localAddr.addr8, pAddrStrRouter, INET6_ADDRSTRLEN);
 
 	if (gCoapConfirmable_c == pSession->msgType)
 	{
 		shell_write("'CON' instruction received from: ");
-		shell_write(pAddrStr);
+		shell_write(pAddrStrLeader);
 		/* Send CoAP ACK */
 		if(gCoapFailure_c != sessionStatus)
 		{
@@ -1469,19 +1623,152 @@ static void APP_CoapTeam8Cb
 	else if(gCoapNonConfirmable_c == pSession->msgType)
 	{
 		shell_write("'NON' instruction received from: ");
-		shell_write(pAddrStr);
+		shell_write(pAddrStrLeader);
+	}
+	shell_write("\r\n");
+
+	sprintf(pMySessionPayloadTemp,"%d",(int)gCounter);
+	while(pMySessionPayloadTemp[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = pMySessionPayloadTemp[i];
+		pMyPayloadSize++;
 	}
 
-	shell_write("\r\n");
-	pMySession -> msgType = gCoapNonConfirmable_c;
-	pMySession -> code = gCoapPOST_c;
+	indx = 0;
+	while(pMySessionPayloadMsg[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = pMySessionPayloadMsg[i];
+		pMyPayloadSize++;
+	}
+
+	indx = 0;
+	while(pAddrStrRouter[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = pAddrStrRouter[i];
+		pMyPayloadSize++;
+	}
+	pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
 	pMySession -> pCallback = NULL;
 	FLib_MemCpy(&pMySession->remoteAddrStorage,&gCoapDestAddress,sizeof(ipAddr_t));
 	COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
+}
 
-	shell_write("Timer Counter: ");
-	shell_write(pMySessionPayload[0]);
-	shell_write("\r\n");
+/*!*************************************************************************************************
+\private
+\fn     static void Accel_Init(void)
+\brief  Initialize the accelerometer from the board.
+
+\param  [in]    param    Not used
+***************************************************************************************************/
+static void Accel_Init(void)
+{
+	i2c_master_config_t i2cConfig;
+	uint8_t sensorRange = 0;
+	uint32_t i2cSourceClock;
+	uint8_t i = 0;
+	uint8_t regResult = 0;
+	uint8_t array_addr_size = 0;
+	bool foundDevice = false;
+
+	/* Board pin, clock, debug console init */
+	BOARD_InitPins();
+	BOARD_BootClockRUN();
+	BOARD_I2C_ReleaseBus();
+	BOARD_I2C_ConfigurePins();
+	BOARD_InitDebugConsole();
+
+	i2cSourceClock = CLOCK_GetFreq(ACCEL_I2C_CLK_SRC);
+	gfxosHandle.base = BOARD_ACCEL_I2C_BASEADDR;
+	gfxosHandle.i2cHandle = &g_MasterHandle;
+
+	I2C_MasterGetDefaultConfig(&i2cConfig);
+	I2C_MasterInit(BOARD_ACCEL_I2C_BASEADDR, &i2cConfig, i2cSourceClock);
+	I2C_MasterTransferCreateHandle(BOARD_ACCEL_I2C_BASEADDR, &g_MasterHandle, NULL, NULL);
+
+	/* Find sensor devices */
+	array_addr_size = sizeof(g_accel_address) / sizeof(g_accel_address[0]);
+	for (i = 0; i < array_addr_size; i++)
+	{
+		gfxosHandle.xfer.slaveAddress = g_accel_address[i];
+		if (FXOS_ReadReg(&gfxosHandle, WHO_AM_I_REG, &regResult, 1) == kStatus_Success)
+		{
+			foundDevice = true;
+			break;
+		}
+		if ((i == (array_addr_size - 1)) && (!foundDevice))
+		{
+			PRINTF("\r\nDo not found sensor device\r\n");
+			while (1)
+			{
+			};
+		}
+	}
+
+	/* Init accelerometer sensor */
+	if (FXOS_Init(&gfxosHandle) != kStatus_Success)
+	{
+		return -1;
+	}
+	/* Get sensor range */
+	if (FXOS_ReadReg(&gfxosHandle, XYZ_DATA_CFG_REG, &sensorRange, 1) != kStatus_Success)
+	{
+		return -1;
+	}
+	if (sensorRange == 0x00)
+	{
+		gdataScale = 2U;
+	}
+	else if (sensorRange == 0x01)
+	{
+		gdataScale = 4U;
+	}
+	else if (sensorRange == 0x10)
+	{
+		gdataScale = 8U;
+	}
+	else
+	{
+	}
+}
+
+/*!*************************************************************************************************
+\private
+\fn     static void APP_CoapAccel8Cb(coapSessionStatus_t sessionStatus, uint8_t *pData,
+                                   coapSession_t *pSession, uint32_t dataLen)
+\brief  This function is the callback function for CoAP sink message.
+
+\param  [in]    sessionStatus   Status for CoAP session
+\param  [in]    pData           Pointer to CoAP message payload
+\param  [in]    pSession        Pointer to CoAP session
+\param  [in]    dataLen         Length of CoAP payload
+***************************************************************************************************/
+static void APP_CoapAccelCb
+(
+	coapSessionStatus_t sessionStatus,
+	uint8_t *pData,
+	coapSession_t *pSession,
+	uint32_t dataLen
+)
+{
+	fxos_data_t sensorData;
+	int16_t xData, yData, zData;
+
+	/* Get new accelerometer data. */
+	if (FXOS_ReadSensorData(&gfxosHandle, &sensorData) != kStatus_Success)
+	{
+		return -1;
+	}
+
+	/* Get the X and Y data from the sensor data structure in 14 bit left format data*/
+	xData = (int16_t)((uint16_t)((uint16_t)sensorData.accelXMSB << 8) | (uint16_t)sensorData.accelXLSB) / 4U;
+	yData = (int16_t)((uint16_t)((uint16_t)sensorData.accelYMSB << 8) | (uint16_t)sensorData.accelYLSB) / 4U;
+	zData = (int16_t)((uint16_t)((uint16_t)sensorData.accelZMSB << 8) | (uint16_t)sensorData.accelZLSB) / 4U;
 }
 #if LARGE_NETWORK
 /*!*************************************************************************************************
