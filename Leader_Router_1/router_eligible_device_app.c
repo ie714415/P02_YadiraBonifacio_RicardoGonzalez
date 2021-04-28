@@ -1595,7 +1595,7 @@ static void APP_CoapTeam8Cb
 	uint32_t dataLen
 )
 {
-	static uint8_t pMySessionPayload[50] = "Counter = ";
+	static uint8_t pMySessionPayload[100] = "Counter = ";
 	static uint32_t pMyPayloadSize = 10;
 	uint8_t indx = 0;
 	char pMySessionPayloadTemp[3];
@@ -1605,15 +1605,15 @@ static void APP_CoapTeam8Cb
 	COAP_AddOptionToList(pMySession, COAP_URI_PATH_OPTION, APP_TEAM8_URI_PATH, SizeOfString(APP_TEAM8_URI_PATH));
 
 	char pAddrStrLeader[INET6_ADDRSTRLEN];
-	ntop(AF_INET6, (ipAddr_t *)&pSession->remoteAddrStorage.ss_addr, pAddrStrLeader, INET6_ADDRSTRLEN);
+	ntop(AF_INET6, (ipAddr_t *)&pSession->localAddr.addr8, pAddrStrLeader, INET6_ADDRSTRLEN);
 
 	char pAddrStrRouter[INET6_ADDRSTRLEN];
-	ntop(AF_INET6, (ipAddr_t *)&pSession->localAddr.addr8, pAddrStrRouter, INET6_ADDRSTRLEN);
+	ntop(AF_INET6, (ipAddr_t *)&pSession->remoteAddrStorage.ss_addr, pAddrStrRouter, INET6_ADDRSTRLEN);
 
 	if (gCoapConfirmable_c == pSession->msgType)
 	{
 		shell_write("'CON' instruction received from: ");
-		shell_write(pAddrStrLeader);
+		shell_write(pAddrStrRouter);
 		/* Send CoAP ACK */
 		if(gCoapFailure_c != sessionStatus)
 		{
@@ -1623,7 +1623,7 @@ static void APP_CoapTeam8Cb
 	else if(gCoapNonConfirmable_c == pSession->msgType)
 	{
 		shell_write("'NON' instruction received from: ");
-		shell_write(pAddrStrLeader);
+		shell_write(pAddrStrRouter);
 	}
 	shell_write("\r\n");
 
@@ -1646,16 +1646,14 @@ static void APP_CoapTeam8Cb
 	}
 
 	indx = 0;
-	while(pAddrStrRouter[indx] != 0)
+	while(pAddrStrLeader[indx] != 0)
 		indx++;
 	for(uint8_t i = 0; indx > i; i++)
 	{
-		pMySessionPayload[pMyPayloadSize] = pAddrStrRouter[i];
+		pMySessionPayload[pMyPayloadSize] = pAddrStrLeader[i];
 		pMyPayloadSize++;
 	}
 	pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
-	pMySession -> pCallback = NULL;
-	FLib_MemCpy(&pMySession->remoteAddrStorage,&gCoapDestAddress,sizeof(ipAddr_t));
 	COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
 }
 
@@ -1756,8 +1754,20 @@ static void APP_CoapAccelCb
 	uint32_t dataLen
 )
 {
+	static uint8_t pMySessionPayload[150];
+	static uint32_t pMyPayloadSize = 0;
+	uint8_t indx = 0;
+	char pMySessionPayloadMsg[] = " from IPv6 address ";
+	coapSession_t *pMySession = NULL;
 	fxos_data_t sensorData;
 	int16_t xData, yData, zData;
+	char xDataStr[5], yDataStr[5], zDataStr[5];
+
+	pMySession = COAP_OpenSession(mAppCoapInstId);
+	COAP_AddOptionToList(pMySession, COAP_URI_PATH_OPTION, APP_ACCEL_URI_PATH, SizeOfString(APP_ACCEL_URI_PATH));
+
+	char pAddrStrLeader[INET6_ADDRSTRLEN];
+	ntop(AF_INET6, (ipAddr_t *)&pSession->localAddr.addr8, pAddrStrLeader, INET6_ADDRSTRLEN);
 
 	/* Get new accelerometer data. */
 	if (FXOS_ReadSensorData(&gfxosHandle, &sensorData) != kStatus_Success)
@@ -1769,6 +1779,85 @@ static void APP_CoapAccelCb
 	xData = (int16_t)((uint16_t)((uint16_t)sensorData.accelXMSB << 8) | (uint16_t)sensorData.accelXLSB) / 4U;
 	yData = (int16_t)((uint16_t)((uint16_t)sensorData.accelYMSB << 8) | (uint16_t)sensorData.accelYLSB) / 4U;
 	zData = (int16_t)((uint16_t)((uint16_t)sensorData.accelZMSB << 8) | (uint16_t)sensorData.accelZLSB) / 4U;
+
+	sprintf(xDataStr,"%d",(int)xData);
+	sprintf(yDataStr,"%d",(int)yData);
+	sprintf(zDataStr,"%d",(int)zData);
+
+	pMySessionPayload[pMyPayloadSize] = 'X';
+	pMyPayloadSize++;
+	pMySessionPayload[pMyPayloadSize] = '=';
+	pMyPayloadSize++;
+	while(xDataStr[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = xDataStr[i];
+		pMyPayloadSize++;
+	}
+
+	pMySessionPayload[pMyPayloadSize] = ' ';
+	pMyPayloadSize++;
+	pMySessionPayload[pMyPayloadSize] = 'Y';
+	pMyPayloadSize++;
+	pMySessionPayload[pMyPayloadSize] = '=';
+	pMyPayloadSize++;
+	while(yDataStr[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = yDataStr[i];
+		pMyPayloadSize++;
+	}
+
+	pMySessionPayload[pMyPayloadSize] = ' ';
+	pMyPayloadSize++;
+	pMySessionPayload[pMyPayloadSize] = 'Z';
+	pMyPayloadSize++;
+	pMySessionPayload[pMyPayloadSize] = '=';
+	pMyPayloadSize++;
+	while(zDataStr[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = zDataStr[i];
+		pMyPayloadSize++;
+	}
+
+	indx = 0;
+	while(pMySessionPayloadMsg[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = pMySessionPayloadMsg[i];
+		pMyPayloadSize++;
+	}
+
+	indx = 0;
+	while(pAddrStrLeader[indx] != 0)
+		indx++;
+	for(uint8_t i = 0; indx > i; i++)
+	{
+		pMySessionPayload[pMyPayloadSize] = pAddrStrLeader[i];
+		pMyPayloadSize++;
+	}
+
+	if (gCoapConfirmable_c == pSession->msgType)
+	{
+		if (gCoapGET_c == pSession->code)
+		{
+			pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
+			COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
+		}
+	}
+	else if (gCoapNonConfirmable_c == pSession->msgType)
+	{
+		if (gCoapGET_c == pSession->code)
+		{
+			pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
+			COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
+		}
+	}
 }
 #if LARGE_NETWORK
 /*!*************************************************************************************************
