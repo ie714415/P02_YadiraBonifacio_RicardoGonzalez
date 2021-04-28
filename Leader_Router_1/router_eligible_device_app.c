@@ -17,7 +17,6 @@ Include Files
 /* General Includes */
 #include "EmbeddedTypes.h"
 #include <string.h>
-#include <stdlib.h>
 
 /* FSL Framework */
 #include "shell.h"
@@ -217,7 +216,7 @@ tmrTimerID_t mAppTimerId = gTmrInvalidTimerID_c;
 /* Global Variable to store our TimerID */
 tmrTimerID_t gTimerID = gTmrInvalidTimerID_c;
 
-static uint8_t gCounter = START_COUNTER;
+uint8_t gCounter = START_COUNTER;
 
 i2c_master_handle_t g_MasterHandle;
 /* FXOS device address */
@@ -588,8 +587,6 @@ void APP_Commissioning_Handler
             App_UpdateStateLeds(gDeviceState_FactoryDefault_c);
             break;
         case gThrEv_MeshCop_JoinerAccepted_c:
-        	gTimerID = TMR_AllocateTimer();
-        	TMR_StartIntervalTimer(gTimerID,1000,TaskTimerCallback,NULL);
             break;
 
         /* Commissioner Events(event set applies for all Commissioners: on-mesh, external, native) */
@@ -617,6 +614,8 @@ void APP_Commissioning_Handler
         case gThrEv_MeshCop_CommissionerJoinerDtlsError_c:
             break;
         case gThrEv_MeshCop_CommissionerJoinerAccepted_c:
+        	gTimerID = TMR_AllocateTimer();
+        	TMR_StartIntervalTimer(gTimerID,1000,TaskTimerCallback,NULL);
             break;
         case gThrEv_MeshCop_CommissionerNwkDataSynced_c:
             break;
@@ -1595,17 +1594,11 @@ static void APP_CoapTeam8Cb
 	uint32_t dataLen
 )
 {
-	static uint8_t pMySessionPayload[100] = "Counter = ";
-	static uint32_t pMyPayloadSize = 10;
-	uint8_t indx = 0;
-	char pMySessionPayloadTemp[3];
-	char pMySessionPayloadMsg[] = " from ";
+	static uint8_t pMySessionPayload[3];
+	static uint32_t pMyPayloadSize = 3;
 	coapSession_t *pMySession = NULL;
 	pMySession = COAP_OpenSession(mAppCoapInstId);
 	COAP_AddOptionToList(pMySession, COAP_URI_PATH_OPTION, APP_TEAM8_URI_PATH, SizeOfString(APP_TEAM8_URI_PATH));
-
-	char pAddrStrLeader[INET6_ADDRSTRLEN];
-	ntop(AF_INET6, (ipAddr_t *)&pSession->localAddr.addr8, pAddrStrLeader, INET6_ADDRSTRLEN);
 
 	char pAddrStrRouter[INET6_ADDRSTRLEN];
 	ntop(AF_INET6, (ipAddr_t *)&pSession->remoteAddrStorage.ss_addr, pAddrStrRouter, INET6_ADDRSTRLEN);
@@ -1627,33 +1620,10 @@ static void APP_CoapTeam8Cb
 	}
 	shell_write("\r\n");
 
-	sprintf(pMySessionPayloadTemp,"%d",(int)gCounter);
-	while(pMySessionPayloadTemp[indx] != 0)
-		indx++;
-	for(uint8_t i = 0; indx > i; i++)
-	{
-		pMySessionPayload[pMyPayloadSize] = pMySessionPayloadTemp[i];
-		pMyPayloadSize++;
-	}
+	itoa(gCounter,pMySessionPayload,10);
 
-	indx = 0;
-	while(pMySessionPayloadMsg[indx] != 0)
-		indx++;
-	for(uint8_t i = 0; indx > i; i++)
-	{
-		pMySessionPayload[pMyPayloadSize] = pMySessionPayloadMsg[i];
-		pMyPayloadSize++;
-	}
-
-	indx = 0;
-	while(pAddrStrLeader[indx] != 0)
-		indx++;
-	for(uint8_t i = 0; indx > i; i++)
-	{
-		pMySessionPayload[pMyPayloadSize] = pAddrStrLeader[i];
-		pMyPayloadSize++;
-	}
-	pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
+	pMySession -> msgType = gCoapMsgTypeNonPost_c;
+	FLib_MemCpy(&pMySession->remoteAddrStorage,&gCoapDestAddress,sizeof(ipAddr_t));
 	COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
 }
 
@@ -1754,7 +1724,7 @@ static void APP_CoapAccelCb
 	uint32_t dataLen
 )
 {
-	static uint8_t pMySessionPayload[150];
+	static uint8_t pMySessionPayload[100];
 	static uint32_t pMyPayloadSize = 0;
 	uint8_t indx = 0;
 	char pMySessionPayloadMsg[] = " from IPv6 address ";
@@ -1841,12 +1811,14 @@ static void APP_CoapAccelCb
 		pMySessionPayload[pMyPayloadSize] = pAddrStrLeader[i];
 		pMyPayloadSize++;
 	}
+	pMySessionPayload[pMyPayloadSize] = '\0';
 
 	if (gCoapConfirmable_c == pSession->msgType)
 	{
 		if (gCoapGET_c == pSession->code)
 		{
 			pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
+			FLib_MemCpy(&pMySession->remoteAddrStorage,&gCoapDestAddress,sizeof(ipAddr_t));
 			COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
 		}
 	}
@@ -1854,7 +1826,8 @@ static void APP_CoapAccelCb
 	{
 		if (gCoapGET_c == pSession->code)
 		{
-			pMySession -> msgType = gCoapMsgTypeAckSuccessContent_c;
+			pMySession -> msgType = gCoapMsgTypeNonPost_c;
+			FLib_MemCpy(&pMySession->remoteAddrStorage,&gCoapDestAddress,sizeof(ipAddr_t));
 			COAP_Send(pMySession, pMySession->msgType, pMySessionPayload, pMyPayloadSize);
 		}
 	}
